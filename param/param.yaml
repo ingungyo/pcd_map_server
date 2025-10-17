@@ -1,0 +1,11 @@
+pcd_map_server:
+  ros__parameters:
+    pcd_map_topic: "pcd/map"
+    input_cloud_topic: "scan/points"
+    map_frame_id: "map"
+    pcd_dir: "/root/ros2_ws/src"
+    pcd_file_name: "samhyun_sim.pcd"
+    output_dir: "./"
+    remove_ground_max_slope_deg: 10.0
+    publish_on_start: true
+    output_dir: "./"

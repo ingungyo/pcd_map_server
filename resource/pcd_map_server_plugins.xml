@@ -1,0 +1,7 @@
+<library path="pcd_map_server">
+  <class
+    type="pcd_map_server::PcdMapServer"
+    base_class_type="rclcpp_components::NodeFactory">
+    <description>PCD Map Server Component</description>
+  </class>
+</library>
