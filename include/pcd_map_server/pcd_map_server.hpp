@@ -42,11 +42,20 @@ private:
     std_srvs::srv::Trigger::Response::SharedPtr);
 
   std::optional<sensor_msgs::msg::PointCloud2>
-  grab_point_cloud_once(const std::string & topic,
+  grab_pointcloud_once(const std::string & topic,
     std::chrono::milliseconds timeout, bool transient_local);
 
-  bool save_cloud_to_pcd(const sensor_msgs::msg::PointCloud2 & cloud,
+  bool save_pointcloud_to_pcd(const sensor_msgs::msg::PointCloud2 & cloud,
     std::string & saved_path) const;
+
+  bool save_pointcloud_to_pgm(
+    const sensor_msgs::msg::PointCloud2& cloud,
+    const std::string& out_dir,
+    const std::string& stem,
+    std::string& pgm_path_out,
+    std::string& yaml_path_out) const;
+
+  
 
   // utils
   static std::string timestamped_name(const std::string & base, const std::string & ext);
@@ -54,17 +63,34 @@ private:
 
 private:
   // params
+  
   std::string pcd_map_topic_;
   std::string map_frame_id_;
   std::string pcd_dir_;
   std::string pcd_file_name_;
   bool publish_on_start_{true};
 
+  bool use_pcd_file_{false};
   std::string input_cloud_topic_;
   std::string output_dir_;
   std::string output_file_name_;
   int  snapshot_timeout_sec_{3};
   bool snapshot_transient_local_{false};
+
+  double proj_z_min_;
+  double proj_z_max_;
+  double proj_resolution_;
+  double proj_padding_m_;
+  int proj_dilate_radius_px_;
+  double ground_z_min_;
+  double ground_z_max_;
+  double obstacle_z_thresh_;
+  bool use_intensity_;
+  double intensity_thresh_;
+  double yaml_occupied_thresh_;
+  double yaml_free_thresh_;
+  std::string yaml_mode_;
+  int yaml_negate_;
   
 
   // derived
