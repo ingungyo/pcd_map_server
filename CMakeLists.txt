@@ -24,8 +24,6 @@ find_package(PCL REQUIRED COMPONENTS io filters)
 
 add_library(${PROJECT_NAME} SHARED
   src/pcd_map_server.cpp
-  src/save_pcd_map.cpp
-  src/remove_ground.cpp
 )
 
 ament_target_dependencies(${PROJECT_NAME}
