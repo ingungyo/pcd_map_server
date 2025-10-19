@@ -3,9 +3,16 @@
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
+namespace {
+  inline bool inRange(int x, int y, int w, int h) { return (x>=0 && x<w && y>=0 && y<h); }
+  struct Cell2i { int x, y; };
+  struct CellHasher { size_t operator()(Cell2i const& c) const noexcept { return (static_cast<size_t>(c.x) << 32) ^ static_cast<size_t>(c.y); } };
+  struct CellEq { bool operator()(Cell2i const& a, Cell2i const& b) const noexcept { return a.x==b.x && a.y==b.y; } };
+  } // anon
+  
+
 namespace pcd_map_server
 {
-// ---------- ctor ----------
 PcdMapServer::PcdMapServer(const rclcpp::NodeOptions & options)
 : rclcpp::Node("pcd_map_server", options)
 {
@@ -60,6 +67,14 @@ void PcdMapServer::set_param()
   yaml_free_thresh_ = this->declare_parameter<double>("save_grid.yaml_free_thresh", 0.25);
   yaml_mode_ = this->declare_parameter<std::string>("save_grid.yaml_mode", "trinary");
   yaml_negate_ = this->declare_parameter<int>("save_grid.yaml_negate", 0);
+
+  proj_max_range_m_      = this->declare_parameter<double>("save_grid.proj_max_range_m", 20.0);
+  proj_origin_subsample_ = this->declare_parameter<int>("save_grid.proj_origin_subsample", 3);
+  path_file_             = this->declare_parameter<std::string>("save_grid.path_file", "");
+  path_format_           = this->declare_parameter<std::string>("save_grid.path_format", "csv"); // csv|tum
+  // normalize format
+  std::transform(path_format_.begin(), path_format_.end(), path_format_.begin(), ::tolower);
+  if (path_format_ != "csv" && path_format_ != "tum") path_format_ = "csv";
   
   pcd_file_path_ = normalize_pcd_path(pcd_dir_, pcd_file_name_);
 
@@ -304,17 +319,17 @@ bool PcdMapServer::save_pointcloud_to_pgm(
   std::string& pgm_path_out,
   std::string& yaml_path_out) const
 {
-  // 1) ROS → PCL
+  // ---------- 1) ROS → PCL ----------
   pcl::PointCloud<pcl::PointXYZ> pc;
   pcl::fromROSMsg(cloud, pc);
 
-  // 2) Z 필터링
+  // ---------- 2) Z 필터 & AABB 수집 ----------
   std::vector<Eigen::Vector2f> xy;
   xy.reserve(pc.size());
-  double min_x=std::numeric_limits<double>::infinity(),
-         min_y=std::numeric_limits<double>::infinity(),
-         max_x=-std::numeric_limits<double>::infinity(),
-         max_y=-std::numeric_limits<double>::infinity();
+  double min_x= std::numeric_limits<double>::infinity();
+  double min_y= std::numeric_limits<double>::infinity();
+  double max_x=-std::numeric_limits<double>::infinity();
+  double max_y=-std::numeric_limits<double>::infinity();
 
   for (const auto& p : pc.points) {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
@@ -331,7 +346,7 @@ bool PcdMapServer::save_pointcloud_to_pgm(
     return false;
   }
 
-  // 3) 격자 크기/원점 계산
+  // ---------- 3) 격자 크기/원점 ----------
   const double pad = std::max(0.0, proj_padding_m_);
   const double res = proj_resolution_ > 0.0 ? proj_resolution_ : 0.05;
 
@@ -341,89 +356,175 @@ bool PcdMapServer::save_pointcloud_to_pgm(
   const double max_y_pad = max_y + pad;
 
   const int width  = static_cast<int>(std::ceil((max_x_pad - min_x_pad) / res));
-  const int height = static_cast<int>(static_cast<int>(std::ceil((max_y_pad - min_y_pad) / res)));
-
+  const int height = static_cast<int>(std::ceil((max_y_pad - min_y_pad) / res));
   if (width <= 0 || height <= 0) {
     RCLCPP_WARN(get_logger(), "Invalid grid size (w=%d,h=%d).", width, height);
     return false;
   }
 
-  // Nav2/map_server 관례: 0=occupied(검정), 254=free(흰색), 205=unknown
+  // Nav2/map_server 관례: 0=occupied, 254=free, 205=unknown
   const uint8_t OCC = 0, FREE = 254, UNK = 205;
 
   std::vector<uint8_t> img(static_cast<size_t>(width) * height, UNK);
 
+  auto toCell = [&](double x, double y, int& ix, int& iy){
+    ix = static_cast<int>(std::floor((x - min_x_pad) / res));
+    iy = static_cast<int>(std::floor((max_y_pad - y) / res)); // y-플립(이미지 좌표)
+  };
+  auto inRange = [&](int x, int y){ return (x>=0 && x<width && y>=0 && y<height); };
+
+  // ---------- 4) Path(센서 원점들) 로드 (옵션) ----------
+  std::vector<Eigen::Vector3f> origins;
+  if (!path_file_.empty()) {
+    bool loaded = false;
+    if (path_format_ == "csv") {
+      std::ifstream f(path_file_);
+      if (f.is_open()) {
+        std::string line; std::getline(f, line); // header: idx,stamp,frame_id,x,y,z,qx,qy,qz,qw
+        while (std::getline(f, line)) {
+          std::stringstream ss(line); std::string tok; int col=0; double x=0,y=0,z=0;
+          while (std::getline(ss, tok, ',')) {
+            if (col==3) x = std::stod(tok);
+            if (col==4) y = std::stod(tok);
+            if (col==5) z = std::stod(tok);
+            ++col;
+          }
+          origins.emplace_back((float)x,(float)y,(float)z);
+        }
+        loaded = !origins.empty();
+      }
+    } else { // TUM
+      std::ifstream f(path_file_);
+      if (f.is_open()) {
+        std::string line;
+        while (std::getline(f, line)) {
+          if (line.empty() || line[0]=='#') continue;
+          std::stringstream ss(line); double t,x,y,z,qx,qy,qz,qw;
+          if (ss>>t>>x>>y>>z>>qx>>qy>>qz>>qw) origins.emplace_back((float)x,(float)y,(float)z);
+        }
+        loaded = !origins.empty();
+      }
+    }
+    if (!loaded) {
+      RCLCPP_WARN(get_logger(), "Path file specified but failed to load: %s", path_file_.c_str());
+    }
+  }
+
+  // ---------- 5) (fallback 대비) 셀 통계 ----------
   struct CellStat { double min_z=std::numeric_limits<double>::infinity();
                     double max_z=-std::numeric_limits<double>::infinity();
                     bool observed=false; };
   std::vector<CellStat> stat(static_cast<size_t>(width) * height);
-
   for (const auto& p : pc.points) {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
-    if (p.z < proj_z_min_ || p.z > proj_z_max_) continue; // 투영용 z 필터가 있다면 유지
-  
-    const int col = static_cast<int>(std::floor((p.x - min_x_pad) / res));
-    const int row = static_cast<int>(std::floor((max_y_pad - p.y) / res));
-    if (col < 0 || col >= width || row < 0 || row >= height) continue;
-  
+    if (p.z < proj_z_min_ || p.z > proj_z_max_) continue;
+    int col = static_cast<int>(std::floor((p.x - min_x_pad) / res));
+    int row = static_cast<int>(std::floor((max_y_pad - p.y) / res));
+    if (!inRange(col,row)) continue;
     auto& s = stat[static_cast<size_t>(row) * width + col];
     s.observed = true;
     if (p.z < s.min_z) s.min_z = p.z;
     if (p.z > s.max_z) s.max_z = p.z;
   }
 
-  for (int r = 0; r < height; ++r) {
-    for (int c = 0; c < width; ++c) {
-      auto& s = stat[static_cast<size_t>(r) * width + c];
-      auto& px = img[static_cast<size_t>(r) * width + c];
-      if (!s.observed) { px = UNK; continue; } // 미관측=UNKNOWN
-  
-      if (s.max_z >= obstacle_z_thresh_) {
-        px = OCC;               // 높은 점이 있으면 장애물
-      } else if (s.min_z <= ground_z_max_ && s.min_z >= ground_z_min_) {
-        px = FREE;              // 지면 대역을 본 셀
-      } else {
-        px = UNK;               // 지면도 아니고 높은 장애물도 아님 → 근거 부족
-      }
+  // ---------- 6) 히트셀(점이 있는 셀) 집합 & OCC 마스크 ----------
+  struct Cell2i { int x, y; };
+  struct CellHasher {
+    size_t operator()(Cell2i const& c) const noexcept {
+      return (static_cast<size_t>(c.x) << 32) ^ static_cast<size_t>(c.y);
     }
-  }
+  };
+  struct CellEq { bool operator()(Cell2i const& a, Cell2i const& b) const noexcept { return a.x==b.x && a.y==b.y; } };
 
-  // int r = std::max(0, proj_dilate_radius_px_);
-  const int r = std::max(0, static_cast<int>(std::lround(proj_dilate_radius_px_)));
-  if (r > 0) {
-    std::vector<uint8_t> tmp = img;
-    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
-      if (tmp[static_cast<size_t>(y)*width + x] == OCC) {
-        for (int dy=-r; dy<=r; ++dy) for (int dx=-r; dx<=r; ++dx) {
-          int nx=x+dx, ny=y+dy; if (nx<0||nx>=width||ny<0||ny>=height) continue;
-          img[static_cast<size_t>(ny)*width + nx] = OCC;
-        }
-      }
-    }
-  }
-
-
-
-  // 4) 라스터라이즈
+  std::unordered_set<Cell2i, CellHasher, CellEq> hit_cells;
+  hit_cells.reserve(xy.size());
   for (const auto& v : xy) {
-    // y축 위쪽이 이미지 0행이 되도록 row는 max_y 기준으로 계산(상하반전 방지)
-    const int col = static_cast<int>(std::floor((v.x() - min_x_pad) / res));
-    const int row = static_cast<int>(std::floor((max_y_pad - v.y()) / res)); // <— 주의
-    if (col < 0 || col >= width || row < 0 || row >= height) continue;
-    img[row * width + col] = OCC; // 점 하나라도 있으면 점유로 표시
+    int gx, gy; toCell(v.x(), v.y(), gx, gy);
+    if (inRange(gx, gy)) hit_cells.insert({gx, gy});
+  }
+  std::vector<uint8_t> occ_mask(width * height, 0);
+  for (const auto& h : hit_cells) occ_mask[h.y * width + h.x] = 1;
+
+  // ---------- 7) 레이캐스팅(occlusion-aware)로 FREE 채우기 ----------
+  auto bresenhamFree = [&](int x0, int y0, int x1, int y1){
+    int dx = std::abs(x1 - x0), sx = (x0 < x1) ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy; int x=x0, y=y0;
+    while (true) {
+      if (!(x==x1 && y==y1)) {
+        if (inRange(x,y) && img[y*width + x] != OCC) img[y*width + x] = FREE;
+      }
+      if (x==x1 && y==y1) break;
+      int e2 = 2*err;
+      if (e2 >= dy) { err += dy; x += sx; }
+      if (e2 <= dx) { err += dx; y += sy; }
+    }
+  };
+  auto occluded_before_target = [&](int x0, int y0, int x1, int y1)->bool {
+    int dx = std::abs(x1 - x0), sx = (x0 < x1) ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy; int x=x0, y=y0;
+    while (true) {
+      if (!(x==x1 && y==y1)) {
+        if (inRange(x,y) && occ_mask[y*width + x]) return true; // 목표 이전에 다른 점유를 만남
+      }
+      if (x==x1 && y==y1) break;
+      int e2 = 2*err;
+      if (e2 >= dy) { err += dy; x += sx; }
+      if (e2 <= dx) { err += dx; y += sy; }
+    }
+    return false;
+  };
+
+  if (!origins.empty()) {
+    // 원점 셀화 + 서브샘플링
+    std::vector<Cell2i> origin_cells; origin_cells.reserve(origins.size());
+    for (size_t i=0;i<origins.size();++i) {
+      if (proj_origin_subsample_>1 && (static_cast<int>(i) % proj_origin_subsample_ != 0)) continue;
+      int sx, sy; toCell(origins[i].x(), origins[i].y(), sx, sy);
+      if (inRange(sx, sy)) origin_cells.push_back({sx, sy});
+    }
+    auto within_range = [&](int sx,int sy,int gx,int gy)->bool{
+      if (proj_max_range_m_ <= 0.0) return true;
+      const double dx=(gx-sx)*res, dy=(gy-sy)*res;
+      return (std::hypot(dx,dy) <= proj_max_range_m_);
+    };
+    for (const auto& o : origin_cells) {
+      for (const auto& h : hit_cells) {
+        if (!within_range(o.x,o.y,h.x,h.y)) continue;
+        if (occluded_before_target(o.x, o.y, h.x, h.y)) continue; // 가려지면 skip
+        bresenhamFree(o.x, o.y, h.x, h.y); // 보이는 경우에만 FREE
+      }
+    }
+  } else {
+    // (fallback) Path가 없으면 지면 대역 규칙으로 힌트만(엄밀 ray 없음)
+    for (int r = 0; r < height; ++r) {
+      for (int c = 0; c < width; ++c) {
+        auto& s = stat[static_cast<size_t>(r) * width + c];
+        auto& px = img[static_cast<size_t>(r) * width + c];
+        if (!s.observed) { px = UNK; continue; }
+        if (s.max_z >= obstacle_z_thresh_) px = OCC;
+        else if (s.min_z <= ground_z_max_ && s.min_z >= ground_z_min_) px = FREE;
+        else px = UNK;
+      }
+    }
   }
 
-  // // 5) (옵션) 팽창: 얇은 라인 메꿔 탐색성 보강
-  // const int r = std::max(0, proj_dilate_radius_px_);
-  if (r > 0) {
+  // ---------- 8) 점유(히트셀) 덮어쓰기 ----------
+  for (const auto& h : hit_cells) {
+    img[h.y * width + h.x] = OCC;
+  }
+
+  // ---------- 9) (옵션) 팽창 ----------
+  const int rpx = std::max(0, static_cast<int>(std::lround(proj_dilate_radius_px_)));
+  if (rpx > 0) {
     std::vector<uint8_t> tmp = img;
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
         if (tmp[y*width + x] == OCC) {
-          for (int dy = -r; dy <= r; ++dy) {
-            for (int dx = -r; dx <= r; ++dx) {
-              int nx = x + dx, ny = y + dy;
-              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          for (int dy=-rpx; dy<=rpx; ++dy) {
+            for (int dx=-rpx; dx<=rpx; ++dx) {
+              int nx=x+dx, ny=y+dy; if (!inRange(nx,ny)) continue;
               img[ny*width + nx] = OCC;
             }
           }
@@ -432,14 +533,14 @@ bool PcdMapServer::save_pointcloud_to_pgm(
     }
   }
 
-  // 6) 파일 경로
+  // ---------- 10) 파일 출력 ----------
   try { fs::create_directories(out_dir); } catch (...) {}
   const std::string pgm_name  = stem + ".pgm";
   const std::string yaml_name = stem + ".yaml";
   const fs::path pgm_path  = fs::path(out_dir) / pgm_name;
   const fs::path yaml_path = fs::path(out_dir) / yaml_name;
 
-  // 7) PGM 쓰기 (P5, 8-bit)
+  // PGM (P5, 8bit)
   {
     std::ofstream ofs(pgm_path, std::ios::binary);
     if (!ofs) {
@@ -447,12 +548,11 @@ bool PcdMapServer::save_pointcloud_to_pgm(
       return false;
     }
     ofs << "P5\n" << width << " " << height << "\n255\n";
-    ofs.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size()));
+    ofs.write(reinterpret_cast<const char*>(img.data()),
+              static_cast<std::streamsize>(img.size()));
   }
 
-  // 8) YAML 쓰기 (Nav2 map_server 포맷)
-  // origin 은 격자 (0,0) 픽셀이 나타내는 월드 좌표의 좌하단이 되도록 설정
-  // 우리가 row를 max_y 기준으로 계산했으므로, origin = (min_x_pad, min_y_pad, 0)
+  // YAML (Nav2 map_server)
   {
     std::ofstream yfs(yaml_path);
     if (!yfs) {
@@ -461,8 +561,8 @@ bool PcdMapServer::save_pointcloud_to_pgm(
     }
     yfs << "image: " << pgm_name << "\n";
     yfs << "resolution: " << std::fixed << std::setprecision(6) << res << "\n";
-    yfs << "origin: [" << std::fixed << std::setprecision(6) << min_x_pad << ", "
-        << min_y_pad << ", 0.0]\n";
+    yfs << "origin: [" << std::fixed << std::setprecision(6)
+        << min_x_pad << ", " << min_y_pad << ", 0.0]\n";
     yfs << "mode: " << yaml_mode_ << "\n";
     yfs << "negate: " << yaml_negate_ << "\n";
     yfs << "occupied_thresh: " << yaml_occupied_thresh_ << "\n";
@@ -473,6 +573,7 @@ bool PcdMapServer::save_pointcloud_to_pgm(
   yaml_path_out = fs::absolute(yaml_path).string();
   return true;
 }
+
 
 // ---------- utils ----------
 std::string PcdMapServer::normalize_pcd_path(const std::string &dir, const std::string &name)

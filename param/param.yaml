@@ -4,7 +4,7 @@ pcd_map_server:
       pcd_map_topic: "pcd/map"
       map_frame_id: "map"
       pcd_dir: "/root/ros2_ws/src"
-      pcd_file_name: "samhyun_sim.pcd"
+      pcd_file_name: "test_map.pcd"
       publish_on_start: true
 
     save:
@@ -16,13 +16,13 @@ pcd_map_server:
       snapshot_transient_local: false
 
     save_grid:
-      proj_z_min: 0.2
-      proj_z_max: 1.5
+      proj_z_min: 0.3
+      proj_z_max: 1.8
       proj_resolution: 0.05
       proj_padding_m: 1.0
       proj_dilate_radius_px: 1
       ground_z_min: 0.0
-      ground_z_max: 0.15
+      ground_z_max: 0.3
       obstacle_z_thresh: 0.20
       use_intensity: false
       intensity_thresh: 50.0
@@ -30,3 +30,8 @@ pcd_map_server:
       yaml_free_thresh: 0.25
       yaml_mode: "trinary"
       yaml_negate: 0
+
+      proj_max_range_m: 30.0
+      proj_origin_subsample: 3
+      path_file: "/root/ros2_ws/src/test.csv"  # nav2_path_saver.py 출력
+      path_format: "csv"   # csv | tum

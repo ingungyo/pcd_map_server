@@ -7,6 +7,14 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <vector>
+#include <Eigen/Core>
+
+#include <unordered_set>
+#include <sstream>
+#include <fstream>
+#include <cmath>
+#include <limits>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -91,6 +99,13 @@ private:
   double yaml_free_thresh_;
   std::string yaml_mode_;
   int yaml_negate_;
+  // --- NEW: freespace (Path-based raycasting) ---
+  // ray params
+  double proj_max_range_m_{20.0};
+  int    proj_origin_subsample_{3};
+  // path file to load sensor origins (optional)
+  std::string path_file_;
+  std::string path_format_{"csv"}; // "csv" or "tum"
   
 
   // derived
