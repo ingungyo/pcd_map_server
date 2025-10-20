@@ -72,6 +72,7 @@ void PcdMapServer::set_param()
   proj_origin_subsample_ = this->declare_parameter<int>("save_grid.proj_origin_subsample", 3);
   path_file_             = this->declare_parameter<std::string>("save_grid.path_file", "");
   path_format_           = this->declare_parameter<std::string>("save_grid.path_format", "csv"); // csv|tum
+  input_path_topic_           = this->declare_parameter<std::string>("save_grid.input_path_topic", "path"); // csv|tum
   // normalize format
   std::transform(path_format_.begin(), path_format_.end(), path_format_.begin(), ::tolower);
   if (path_format_ != "csv" && path_format_ != "tum") path_format_ = "csv";
@@ -177,6 +178,7 @@ void PcdMapServer::on_save_pcd_map(std_srvs::srv::Trigger::Request::ConstSharedP
 {
 
   sensor_msgs::msg::PointCloud2 pointcloud_data;
+  nav_msgs::msg::Path path_data;
 
   if (use_pcd_file_) {
     pcl::PointCloud<pcl::PointXYZ> cloud;
@@ -194,17 +196,16 @@ void PcdMapServer::on_save_pcd_map(std_srvs::srv::Trigger::Request::ConstSharedP
 
   else{
     const auto timeout = std::chrono::seconds(snapshot_timeout_sec_);
-    auto cloud_opt = grab_pointcloud_once(input_cloud_topic_, timeout, snapshot_transient_local_);
 
+    //grab pointcloud data
+    auto cloud_opt = grab_pointcloud_once(input_cloud_topic_, timeout, snapshot_transient_local_);
     if (!cloud_opt) {
       res->success = false;
       res->message = "No cloud received within timeout";
       RCLCPP_WARN(get_logger(), "One-shot capture timed out after %d sec", snapshot_timeout_sec_);
       return;
     }
-    
     pointcloud_data = *cloud_opt;
-
     std::string pcd_path;
 
     if (!save_pointcloud_to_pcd(*cloud_opt, pcd_path)) {
@@ -213,8 +214,31 @@ void PcdMapServer::on_save_pcd_map(std_srvs::srv::Trigger::Request::ConstSharedP
       return;
     }
     RCLCPP_INFO(get_logger(), "Saved new PCD: %s", pcd_path.c_str());
+
+    //grab path data
+    auto path_opt = grab_path_once(input_path_topic_, timeout, snapshot_transient_local_);
+    if (!path_opt) {
+      res->success = false;
+      res->message = "No path received within timeout";
+      RCLCPP_WARN(get_logger(), "One-shot capture timed out after %d sec", snapshot_timeout_sec_);
+      return;
+    }
+    path_data = *path_opt;
+    std::string path_path;
+    // bool PcdMapServer::save_path_to_file(const nav_msgs::msg::Path &paths,
+    //   const std::string &out_dir, std::string format, std::string *saved_path_out)
+    if (!save_path_to_file(*path_opt, path_path, "csv")) {
+      res->success = false;
+      res->message = "path save failed";
+      return;
+    }
+    RCLCPP_INFO(get_logger(), "Saved new path: %s", path_path.c_str());
   }
+
+  //###############save path.csv###########################
+
   
+  //###############save path.csv###########################
 
   const std::string stem = timestamped_name(output_file_name_, "tmp");
   const std::string clean_stem = stem.substr(0, stem.size() - 4);
@@ -290,6 +314,129 @@ PcdMapServer::grab_pointcloud_once(const std::string & topic,
   return *(fut.get());
 }
 
+std::optional<nav_msgs::msg::Path>
+PcdMapServer::grab_path_once(const std::string & topic,
+  std::chrono::milliseconds timeout, bool transient_local)
+{
+  auto tmp = std::make_shared<rclcpp::Node>(
+      "path_snapshot_grabber",
+      rclcpp::NodeOptions().use_intra_process_comms(true));
+
+  auto cbg = tmp->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+  rclcpp::QoS qos = rclcpp::SensorDataQoS();
+  if (transient_local) {
+    qos.keep_last(1).reliable().transient_local();
+  }
+
+  using PathPtr = nav_msgs::msg::Path::ConstSharedPtr;
+  std::promise<PathPtr> prom;
+  auto fut = prom.get_future();
+  std::atomic_bool done{false};
+
+  rclcpp::SubscriptionOptions opts;
+  opts.callback_group = cbg;
+
+  auto sub = tmp->create_subscription<nav_msgs::msg::Path>(
+    topic, qos, [&prom, &done](PathPtr msg){
+      bool expected = false;
+      if (done.compare_exchange_strong(expected, true)) {
+        prom.set_value(msg);
+      }
+    },opts);
+
+  rclcpp::executors::SingleThreadedExecutor exec;
+  exec.add_node(tmp);
+  auto ret = exec.spin_until_future_complete(fut, timeout);
+
+  exec.cancel();
+  sub.reset();
+  tmp.reset();
+
+  if (ret != rclcpp::FutureReturnCode::SUCCESS) {
+    return std::nullopt;
+  }
+
+  return *(fut.get());
+}
+
+bool PcdMapServer::save_path_to_file(const nav_msgs::msg::Path &paths,
+  std::string &saved_path, std::string format, std::string *saved_path_out)
+{
+  if (paths.poses.empty()) return false;
+
+  std::transform(format.begin(), format.end(), format.begin(), ::tolower);
+  if (format != "csv" && format != "json" && format != "tum") return false;
+
+  try {fs::create_directories(output_dir_); } catch (...) { return false; }
+
+  const std::string filename = timestamped_name(output_file_name_,format);
+  saved_path = (fs::path(output_dir_) / filename).string();
+
+  // const std::string base = make_time_base(paths.header.stamp);
+  // const fs::path fname = fs::path(out_dir) / ("path_" + base + "." + format);
+
+  std::ofstream f(saved_path, std::ios::out | std::ios::trunc);
+  if (!f) return false;
+
+  if (format == "csv") {
+    f << "idx,stamp,frame_id,x,y,z,qx,qy,qz,qw\n";
+    for (size_t i = 0; i < paths.poses.size(); ++i) {
+      const auto &p = paths.poses[i];
+      f << i << ","
+      << p.header.stamp.sec << "." << std::setw(9) << std::setfill('0') << p.header.stamp.nanosec << ","
+      << p.header.frame_id << ","
+      << p.pose.position.x << ","
+      << p.pose.position.y << ","
+      << p.pose.position.z << ","
+      << p.pose.orientation.x << ","
+      << p.pose.orientation.y << ","
+      << p.pose.orientation.z << ","
+      << p.pose.orientation.w << "\n";
+    }
+  } else if (format == "json") {
+    f << "{\n"
+    << "  \"header\": {\n"
+    << "    \"stamp\": {\"sec\": " << paths.header.stamp.sec
+    << ", \"nanosec\": " << paths.header.stamp.nanosec << "},\n"
+    << "    \"frame_id\": " << json_quote(paths.header.frame_id) << "\n"
+    << "  },\n"
+    << "  \"poses\": [\n";
+    for (size_t i = 0; i < paths.poses.size(); ++i) {
+      const auto &p = paths.poses[i];
+      f << "    {\n"
+      << "      \"stamp\": {\"sec\": " << p.header.stamp.sec
+      << ", \"nanosec\": " << p.header.stamp.nanosec << "},\n"
+      << "      \"frame_id\": " << json_quote(p.header.frame_id) << ",\n"
+      << "      \"position\": {\"x\": " << p.pose.position.x
+      << ", \"y\": " << p.pose.position.y
+      << ", \"z\": " << p.pose.position.z << "},\n"
+      << "      \"orientation\": {\"x\": " << p.pose.orientation.x
+      << ", \"y\": " << p.pose.orientation.y
+      << ", \"z\": " << p.pose.orientation.z
+      << ", \"w\": " << p.pose.orientation.w << "}\n"
+      << "    }" << (i + 1 == paths.poses.size() ? "\n" : ",\n");
+    }
+    f << "  ]\n}\n";
+  } else { // TUM
+    f << std::fixed << std::setprecision(9);
+    for (const auto &p : paths.poses) {
+      const double t = stamp_to_sec(p.header.stamp);
+      f << t << " "
+      << p.pose.position.x << " "
+      << p.pose.position.y << " "
+      << p.pose.position.z << " "
+      << p.pose.orientation.x << " "
+      << p.pose.orientation.y << " "
+      << p.pose.orientation.z << " "
+      << p.pose.orientation.w << "\n";
+    }
+  }
+
+  if (saved_path_out) *saved_path_out = fs::absolute(saved_path).string();
+  return true;
+}
+
 bool PcdMapServer::save_pointcloud_to_pcd(const sensor_msgs::msg::PointCloud2 & cloud,
   std::string & saved_path) const
 {
@@ -362,14 +509,14 @@ bool PcdMapServer::save_pointcloud_to_pgm(
     return false;
   }
 
-  // Nav2/map_server 관례: 0=occupied, 254=free, 205=unknown
+  //0=occupied, 254=free, 205=unknown
   const uint8_t OCC = 0, FREE = 254, UNK = 205;
 
   std::vector<uint8_t> img(static_cast<size_t>(width) * height, UNK);
 
   auto toCell = [&](double x, double y, int& ix, int& iy){
     ix = static_cast<int>(std::floor((x - min_x_pad) / res));
-    iy = static_cast<int>(std::floor((max_y_pad - y) / res)); // y-플립(이미지 좌표)
+    iy = static_cast<int>(std::floor((max_y_pad - y) / res));
   };
   auto inRange = [&](int x, int y){ return (x>=0 && x<width && y>=0 && y<height); };
 
@@ -575,6 +722,9 @@ bool PcdMapServer::save_pointcloud_to_pgm(
 }
 
 
+
+
+
 // ---------- utils ----------
 std::string PcdMapServer::normalize_pcd_path(const std::string &dir, const std::string &name)
 {
@@ -597,5 +747,37 @@ std::string PcdMapServer::timestamped_name(const std::string & base, const std::
   oss << base << "_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << "." << ext;
   return oss.str();
 }
+
+double PcdMapServer::stamp_to_sec(const builtin_interfaces::msg::Time &st) {
+  return static_cast<double>(st.sec) + static_cast<double>(st.nanosec) * 1e-9;
+}
+
+std::string PcdMapServer::make_time_base(const builtin_interfaces::msg::Time &st) {
+  // "YYYYmmdd_HHMMSS_nanosec"
+  std::time_t tt = static_cast<std::time_t>(st.sec);
+  std::tm tm{};
+#if defined(_WIN32)
+  gmtime_s(&tm, &tt);
+#else
+  gmtime_r(&tt, &tm);
+#endif
+  std::ostringstream oss;
+  oss << std::put_time(&tm, "%Y%m%d_%H%M%S") << "_" << std::setw(9) << std::setfill('0') << st.nanosec;
+  return oss.str();
+}
+
+std::string PcdMapServer::json_quote(const std::string &s) {
+  std::ostringstream o; o << '"';
+  for (char c : s) {
+    switch (c) {
+      case '\\': o << "\\\\"; break; case '"': o << "\\\""; break;
+      case '\n': o << "\\n"; break; case '\r': o << "\\r"; break; case '\t': o << "\\t"; break;
+      default:   o << c; break;
+    }
+  }
+  o << '"'; return o.str();
+}
+
+
 
 } // namespace pcd_map_server

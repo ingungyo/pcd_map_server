@@ -18,6 +18,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include <pcl/io/pcd_io.h>
@@ -53,6 +54,14 @@ private:
   grab_pointcloud_once(const std::string & topic,
     std::chrono::milliseconds timeout, bool transient_local);
 
+  std::optional<nav_msgs::msg::Path>
+  grab_path_once(const std::string & topic,
+    std::chrono::milliseconds timeout, bool trasient_local);
+
+  bool save_path_to_file(const nav_msgs::msg::Path &paths,
+    std::string &saved_path, std::string format,
+    std::string *saved_path_out = nullptr);
+
   bool save_pointcloud_to_pcd(const sensor_msgs::msg::PointCloud2 & cloud,
     std::string & saved_path) const;
 
@@ -68,6 +77,10 @@ private:
   // utils
   static std::string timestamped_name(const std::string & base, const std::string & ext);
   static std::string normalize_pcd_path(const std::string &dir, const std::string &name);
+  static double stamp_to_sec(const builtin_interfaces::msg::Time &st);
+  static std::string make_time_base(const builtin_interfaces::msg::Time &st);
+  static std::string json_quote(const std::string &s);
+
 
 private:
   // params
@@ -106,6 +119,7 @@ private:
   // path file to load sensor origins (optional)
   std::string path_file_;
   std::string path_format_{"csv"}; // "csv" or "tum"
+  std::string input_path_topic_;
   
 
   // derived

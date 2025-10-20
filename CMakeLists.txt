@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(pcd_map_server)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
@@ -18,7 +20,7 @@ find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(PCL REQUIRED COMPONENTS io filters)
+find_package(PCL REQUIRED COMPONENTS common io filters)
 
 # set(PCD_COMPONENT_LIB pcd_map_server_component)
 
@@ -46,13 +48,16 @@ target_link_libraries(${PROJECT_NAME}
   ${PCL_LIBRARIES}
 )
 
-# rclcpp_components_register_nodes(${PROJECT_NAME}
-#   "pcd_map_server::PcdMapServer"
-# )
-
 add_executable(pcd_map_server_node src/pcd_map_server_node.cpp)
-ament_target_dependencies(pcd_map_server_node rclcpp)
 target_link_libraries(pcd_map_server_node ${PROJECT_NAME}) 
+ament_target_dependencies(pcd_map_server_node
+  rclcpp
+  std_msgs
+  std_srvs
+  sensor_msgs
+  nav_msgs
+  pcl_conversions
+)
 
 install(TARGETS
   ${PROJECT_NAME}   
