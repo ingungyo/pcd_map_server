@@ -3,27 +3,27 @@ pcd_map_server:
     publish:
       pcd_map_topic: "pcd/map"
       map_frame_id: "map"
-      pcd_dir: "/root/ros2_ws/src"
-      pcd_file_name: "test_map.pcd"
+      pcd_dir: "/root/ros2_ws/src/pcd_map_server/data"
+      pcd_file_name: "test.pcd"
       publish_on_start: true
 
     save:
-      use_pcd_file: true
+      use_pcd_file: true 
       input_cloud_topic: "Laser_map"
-      output_dir: "/root/ros2_ws/src"
+      output_dir: "/root/ros2_ws/src/pcd_map_server/data"
       output_file_name: "map"
       snapshot_timeout_sec: 3
       snapshot_transient_local: false
 
     save_grid:
-      proj_z_min: 0.3
-      proj_z_max: 1.8
+      proj_z_min: 0.5
+      proj_z_max: 3.0
       proj_resolution: 0.05
       proj_padding_m: 1.0
       proj_dilate_radius_px: 1
       ground_z_min: 0.0
       ground_z_max: 0.3
-      obstacle_z_thresh: 0.20
+      obstacle_z_thresh: 0.50
       use_intensity: false
       intensity_thresh: 50.0
       yaml_occupied_thresh: 0.65
@@ -31,7 +31,7 @@ pcd_map_server:
       yaml_mode: "trinary"
       yaml_negate: 0
 
-      proj_max_range_m: 30.0
+      proj_max_range_m: 50.0
       proj_origin_subsample: 3
-      path_file: "/root/ros2_ws/src/test.csv"  # nav2_path_saver.py 출력
+      path_file: "/root/ros2_ws/src/pcd_map_server/data/test.csv"
       path_format: "csv"   # csv | tum
